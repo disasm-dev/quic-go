@@ -269,7 +269,7 @@ func TestTransportConnectionRedial(t *testing.T) {
 	// We can be certain that it wasn't sent out (not even partially).
 	t.Run("error when opening the stream", func(t *testing.T) {
 		require.NoError(t,
-			testTransportConnectionRedial(t, nonRetryableReq, &errConnUnusable{errors.New("test")}, "foobar", true),
+			testTransportConnectionRedial(t, nonRetryableReq, &errConnUnusable{errors.New("test")}, "foobar", true, 2),
 		)
 	})
 
@@ -277,14 +277,14 @@ func TestTransportConnectionRedial(t *testing.T) {
 	// We can be certain that it wasn't sent out (not even partially).
 	t.Run("non-retryable request error after opening the stream", func(t *testing.T) {
 		require.ErrorIs(t,
-			testTransportConnectionRedial(t, nonRetryableReq, assert.AnError, "foobar", false),
+			testTransportConnectionRedial(t, nonRetryableReq, assert.AnError, "foobar", false, 1),
 			assert.AnError,
 		)
 	})
 
 	t.Run("retryable request after opening the stream", func(t *testing.T) {
 		require.ErrorIs(t,
-			testTransportConnectionRedial(t, retryableReq, assert.AnError, "", false),
+			testTransportConnectionRedial(t, retryableReq, assert.AnError, "", false, 1),
 			assert.AnError,
 		)
 	})
@@ -296,6 +296,7 @@ func TestTransportConnectionRedial(t *testing.T) {
 				&Error{ErrorCode: ErrCodeRequestRejected},
 				"foobaz",
 				true,
+				1, // the connection is still alive, so the retry goes on it
 			),
 		)
 	})
@@ -306,13 +307,13 @@ func TestTransportConnectionRedial(t *testing.T) {
 			return nil, assert.AnError
 		}
 		require.ErrorIs(t,
-			testTransportConnectionRedial(t, req, &Error{ErrorCode: ErrCodeRequestRejected}, "", false),
+			testTransportConnectionRedial(t, req, &Error{ErrorCode: ErrCodeRequestRejected}, "", false, 1),
 			assert.AnError,
 		)
 	})
 }
 
-func testTransportConnectionRedial(t *testing.T, req *http.Request, roundtripErr error, expectedBody string, expectRedial bool) error {
+func testTransportConnectionRedial(t *testing.T, req *http.Request, roundtripErr error, expectedBody string, expectRedial bool, wantDials int) error {
 	conn, _ := newConnPair(t)
 	mockCtrl := gomock.NewController(t)
 	cl := NewMockClientConn(mockCtrl)
@@ -339,10 +340,8 @@ func testTransportConnectionRedial(t *testing.T, req *http.Request, roundtripErr
 	}
 
 	_, err := tr.RoundTrip(req)
-	if !expectRedial {
-		assert.Equal(t, 1, dialCount)
-	} else {
-		assert.Equal(t, 2, dialCount)
+	assert.Equal(t, wantDials, dialCount)
+	if expectRedial {
 		assert.Equal(t, expectedBody, body)
 	}
 	return err
