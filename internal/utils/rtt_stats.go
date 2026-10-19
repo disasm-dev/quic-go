@@ -14,8 +14,9 @@ const (
 	oneMinusBeta  = 1 - rttBeta
 )
 
-// The default RTT used before an RTT sample is taken.
-// Chrome uses 100ms, giving PTO of ~200ms for fast retransmission on packet loss.
+// The default RTT used before an RTT sample is taken: quiche's kInitialRttMs,
+// which Chrome keeps unless it has a cached RTT for the server. The PTO before
+// any sample is three of these; see PTO.
 const DefaultInitialRTT = 100 * time.Millisecond
 
 // RTTStats provides round-trip statistics
@@ -66,12 +67,29 @@ func (r *RTTStats) MaxAckDelay() time.Duration {
 	return time.Duration(r.maxAckDelay.Load())
 }
 
-// PTO gets the probe timeout duration.
+// PTO gets the probe timeout duration, before backoff, the way quiche's
+// QuicSentPacketManager::GetProbeTimeoutDelay computes it:
+//
+//	if (rtt_stats_.smoothed_rtt().IsZero()) {
+//	  return std::max(kPtoMultiplierWithoutRttSamples * rtt_stats_.initial_rtt(),
+//	                  QuicTime::Delta::FromMilliseconds(kMinHandshakeTimeoutMs)) * ...
+//	}
+//	QuicTime::Delta pto_delay =
+//	    rtt_stats_.smoothed_rtt() +
+//	    std::max(kPtoRttvarMultiplier * rtt_stats_.mean_deviation(),
+//	             kAlarmGranularity) + ...
+//
+// with kPtoMultiplierWithoutRttSamples 3, kMinHandshakeTimeoutMs 10 and
+// kPtoRttvarMultiplier 2. Before the first RTT sample that is three initial
+// RTTs, 300ms by default, where RFC 9002's twice the initial RTT gave the 200ms
+// that put quic-go's first retransmission of a ClientHello ahead of Chrome's.
+// Until a sample arrives the smoothed RTT holds the initial RTT, which is
+// DefaultInitialRTT unless SetInitialRTT restored one.
 func (r *RTTStats) PTO(includeMaxAckDelay bool) time.Duration {
 	if !r.hasMeasurement {
-		return 2 * DefaultInitialRTT
+		return max(3*r.SmoothedRTT(), 10*time.Millisecond)
 	}
-	pto := r.SmoothedRTT() + max(4*r.MeanDeviation(), protocol.TimerGranularity)
+	pto := r.SmoothedRTT() + max(2*r.MeanDeviation(), protocol.TimerGranularity)
 	if includeMaxAckDelay {
 		pto += r.MaxAckDelay()
 	}

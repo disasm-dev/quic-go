@@ -66,8 +66,9 @@ func TestRTTStatsComputePTO(t *testing.T) {
 	rttStats.UpdateRTT(rtt, 0)
 	require.Equal(t, rtt, rttStats.SmoothedRTT())
 	require.Equal(t, rtt/2, rttStats.MeanDeviation())
-	require.Equal(t, rtt+4*(rtt/2), rttStats.PTO(false))
-	require.Equal(t, rtt+4*(rtt/2)+maxAckDelay, rttStats.PTO(true))
+	// quiche: srtt + 2 * mean deviation, plus max_ack_delay for application data
+	require.Equal(t, rtt+2*(rtt/2), rttStats.PTO(false))
+	require.Equal(t, rtt+2*(rtt/2)+maxAckDelay, rttStats.PTO(true))
 }
 
 func TestRTTStatsPTOWithShortRTT(t *testing.T) {
@@ -135,7 +136,7 @@ func TestRTTStatsResetForPathMigration(t *testing.T) {
 	require.Equal(t, DefaultInitialRTT, rttStats.MinRTT())
 	require.Equal(t, DefaultInitialRTT, rttStats.LatestRTT())
 	require.Equal(t, DefaultInitialRTT, rttStats.SmoothedRTT())
-	require.Equal(t, 2*DefaultInitialRTT, rttStats.PTO(false))
+	require.Equal(t, 3*DefaultInitialRTT, rttStats.PTO(false))
 	// make sure that max_ack_delay was not reset
 	require.Equal(t, 42*time.Millisecond, rttStats.MaxAckDelay())
 
@@ -143,4 +144,18 @@ func TestRTTStatsResetForPathMigration(t *testing.T) {
 	require.True(t, rttStats.HasMeasurement())
 	require.Equal(t, 10*time.Millisecond, rttStats.SmoothedRTT())
 	require.Equal(t, 10*time.Millisecond, rttStats.LatestRTT())
+}
+
+// Before any sample the PTO is quiche's: three initial RTTs, never under 10ms.
+// That is 300ms on a fresh connection, where it used to be 200ms.
+func TestRTTStatsPTOBeforeFirstSample(t *testing.T) {
+	rttStats := NewRTTStats()
+	require.Equal(t, 300*time.Millisecond, rttStats.PTO(false))
+	require.Equal(t, 300*time.Millisecond, rttStats.PTO(true))
+
+	rttStats.SetInitialRTT(50 * time.Millisecond) // restored from a token
+	require.Equal(t, 150*time.Millisecond, rttStats.PTO(false))
+
+	rttStats.SetInitialRTT(time.Millisecond)
+	require.Equal(t, 10*time.Millisecond, rttStats.PTO(false))
 }

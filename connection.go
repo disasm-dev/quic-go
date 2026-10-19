@@ -525,7 +525,9 @@ var newClientConnection = func(
 
 func (c *Conn) preSetup() {
 	c.largestRcvdAppData = protocol.InvalidPacketNumber
-	c.initialStream = newInitialCryptoStream(c.perspective == protocol.PerspectiveClient, c.config.DisableClientHelloScrambling)
+	// Chrome-style Initial packets lay the ClientHello out quiche's way, which
+	// quic-go's own scrambling would undo.
+	c.initialStream = newInitialCryptoStream(c.perspective == protocol.PerspectiveClient, c.config.DisableClientHelloScrambling || c.config.ChromeStyleInitialPackets)
 	c.handshakeStream = newCryptoStream()
 	c.sendQueue = newSendQueue(c.conn)
 	c.retransmissionQueue = newRetransmissionQueue()

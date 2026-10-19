@@ -258,6 +258,9 @@ func (t *Transport) dial(ctx context.Context, addr net.Addr, host string, tlsCon
 		return nil, err
 	}
 	conf = populateConfig(conf)
+	if isIPv6Addr(addr) && conf.InitialPacketSizeIPv6 > 0 {
+		conf.InitialPacketSize = conf.InitialPacketSizeIPv6 // conf is populateConfig's copy
+	}
 	tlsConf = tlsConf.Clone()
 	setTLSConfigServerName(tlsConf, addr, host)
 	return t.doDial(ctx,
@@ -735,6 +738,13 @@ func (t *Transport) ReadNonQUICPacket(ctx context.Context, b []byte) (int, net.A
 	case <-t.listening:
 		return 0, nil, errors.New("closed")
 	}
+}
+
+// isIPv6Addr reports whether addr is a UDP address in the IPv6 family. An
+// IPv4-mapped address is IPv4 on the wire.
+func isIPv6Addr(addr net.Addr) bool {
+	udpAddr, ok := addr.(*net.UDPAddr)
+	return ok && udpAddr.IP.To4() == nil && udpAddr.IP.To16() != nil
 }
 
 func setTLSConfigServerName(tlsConf *tls.Config, addr net.Addr, host string) {

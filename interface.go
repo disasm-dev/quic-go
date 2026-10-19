@@ -179,6 +179,17 @@ type Config struct {
 	// If set too high, the path might not support packets of that size, leading to a timeout of the QUIC handshake.
 	// Values below 1200 are invalid.
 	InitialPacketSize uint16
+	// InitialPacketSizeIPv6, when set, replaces InitialPacketSize for a
+	// connection dialled to an IPv6 address. Chromium sends 20 bytes less over
+	// IPv6, the extra length of its header over IPv4's:
+	//
+	//	// IPv6 packets have an additional 20 bytes of overhead than IPv4 packets.
+	//	const size_t kAdditionalOverheadForIPv6 = 20;
+	//
+	// in QuicChromiumClientSession, which is 1230 against its 1250. Zero
+	// means use InitialPacketSize whatever the family. Values below 1200 are
+	// invalid.
+	InitialPacketSizeIPv6 uint16
 	// DisablePathMTUDiscovery disables Path MTU Discovery (RFC 8899).
 	// This allows the sending of QUIC packets that fully utilize the available MTU of the path.
 	// Path MTU discovery is only available on systems that allow setting of the Don't Fragment (DF) bit.

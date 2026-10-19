@@ -36,6 +36,10 @@ type packetNumberSpace struct {
 	history sentPacketHistory
 	pns     packetNumberGenerator
 
+	// firstPN is the first packet number this space sends, which is what the
+	// peer is still waiting for until it acknowledges anything.
+	firstPN protocol.PacketNumber
+
 	lossTime                   monotime.Time
 	lastAckElicitingPacketTime monotime.Time
 
@@ -53,6 +57,7 @@ func newPacketNumberSpace(initialPN protocol.PacketNumber, isAppData bool) *pack
 	return &packetNumberSpace{
 		history:      *newSentPacketHistory(isAppData),
 		pns:          pns,
+		firstPN:      initialPN,
 		largestSent:  protocol.InvalidPacketNumber,
 		largestAcked: protocol.InvalidPacketNumber,
 	}
@@ -92,6 +97,10 @@ type sentPacketHandler struct {
 	congestion congestion.SendAlgorithmWithDebugInfos
 	rttStats   *utils.RTTStats
 	connStats  *utils.ConnectionStats
+
+	// maxDatagramSize is the current packet size limit, which turns the
+	// congestion window into a packet count for packetNumberLength.
+	maxDatagramSize protocol.ByteCount
 
 	// The number of times a PTO has been sent without receiving an ack.
 	ptoCount uint32
@@ -148,6 +157,7 @@ func NewSentPacketHandler(
 		rttStats:                       rttStats,
 		connStats:                      connStats,
 		congestion:                     congestion,
+		maxDatagramSize:                initialMaxDatagramSize,
 		ignorePacketsBelow:             ignorePacketsBelow,
 		perspective:                    pers,
 		qlogger:                        qlogger,
@@ -960,8 +970,39 @@ func (h *sentPacketHandler) ECNMode(isShortHeaderPacket bool) protocol.ECN {
 func (h *sentPacketHandler) PeekPacketNumber(encLevel protocol.EncryptionLevel) (protocol.PacketNumber, protocol.PacketNumberLen) {
 	pnSpace := h.getPacketNumberSpace(encLevel)
 	pn := pnSpace.pns.Peek()
-	// See section 17.1 of RFC 9000.
-	return pn, protocol.PacketNumberLengthForHeader(pn, pnSpace.largestAcked)
+	return pn, h.packetNumberLength(pnSpace, pn)
+}
+
+// packetNumberLength sizes the packet number of pn the way quiche does in
+// QuicPacketCreator::UpdatePacketNumberLength:
+//
+//	const uint64_t current_delta =
+//	    next_packet_number - least_packet_awaited_by_peer;
+//	const uint64_t delta = std::max(current_delta, max_packets_in_flight);
+//	const QuicPacketNumberLength packet_number_length =
+//	    QuicFramer::GetMinPacketNumberLength(QuicPacketNumber(delta * 4));
+//
+// The peer is awaiting the packet after the largest it acknowledged, or an
+// earlier one still outstanding, and before it acknowledges anything, the
+// space's first packet. max_packets_in_flight is the congestion window in
+// packets. Four times the larger of the two leaves the peer twice the range
+// RFC 9000 section 17.1 asks for.
+//
+// A fresh connection comes out at one byte: Chrome's Initial packets carry
+// 1-byte packet numbers, where quic-go never used fewer than two.
+func (h *sentPacketHandler) packetNumberLength(ps *packetNumberSpace, pn protocol.PacketNumber) protocol.PacketNumberLen {
+	leastAwaited := ps.firstPN
+	if ps.largestAcked != protocol.InvalidPacketNumber {
+		leastAwaited = ps.largestAcked + 1
+		if first, _ := ps.history.FirstOutstanding(); first != protocol.InvalidPacketNumber && first < leastAwaited {
+			leastAwaited = first
+		}
+	}
+	delta := max(pn-leastAwaited, 0)
+	if h.maxDatagramSize > 0 {
+		delta = max(delta, protocol.PacketNumber(h.congestion.GetCongestionWindow()/h.maxDatagramSize))
+	}
+	return protocol.PacketNumberLengthForDelta(delta)
 }
 
 func (h *sentPacketHandler) PopPacketNumber(encLevel protocol.EncryptionLevel) protocol.PacketNumber {
@@ -1027,6 +1068,7 @@ func (h *sentPacketHandler) TimeUntilSend() monotime.Time {
 }
 
 func (h *sentPacketHandler) SetMaxDatagramSize(s protocol.ByteCount) {
+	h.maxDatagramSize = s
 	h.congestion.SetMaxDatagramSize(s)
 }
 
@@ -1117,6 +1159,7 @@ func (h *sentPacketHandler) ResetForRetry(now monotime.Time) {
 
 func (h *sentPacketHandler) MigratedPath(now monotime.Time, initialMaxDatagramSize protocol.ByteCount) {
 	h.rttStats.ResetForPathMigration()
+	h.maxDatagramSize = initialMaxDatagramSize
 	for pn, p := range h.appDataPackets.history.Packets() {
 		h.appDataPackets.history.DeclareLost(pn)
 		if !p.isPathProbePacket {

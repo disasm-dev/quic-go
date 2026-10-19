@@ -1073,3 +1073,30 @@ func TestPackPathProbePacket(t *testing.T) {
 	require.True(t, p.IsPathProbePacket)
 	require.False(t, p.IsPathMTUProbePacket)
 }
+
+// A client that closes between completing and confirming the handshake sends
+// CONNECTION_CLOSE at Initial, Handshake and 1-RTT in one datagram, and the
+// Initial is padded to fill it. The 1-RTT packet's AEAD tag used to be left
+// out of the sum, so the datagram came out a tag longer than the maximum:
+// 1266 bytes where the limit was 1250.
+func TestPackConnectionCloseCoalescedClient1RTTFitsMaxSize(t *testing.T) {
+	const maxPacketSize protocol.ByteCount = 1234
+	mockCtrl := gomock.NewController(t)
+	tp := newTestPacketPacker(t, mockCtrl, protocol.PerspectiveClient)
+	tp.pnManager.EXPECT().PeekPacketNumber(protocol.EncryptionInitial).Return(protocol.PacketNumber(1), protocol.PacketNumberLen2)
+	tp.pnManager.EXPECT().PopPacketNumber(protocol.EncryptionInitial).Return(protocol.PacketNumber(1))
+	tp.pnManager.EXPECT().PeekPacketNumber(protocol.EncryptionHandshake).Return(protocol.PacketNumber(2), protocol.PacketNumberLen2)
+	tp.pnManager.EXPECT().PopPacketNumber(protocol.EncryptionHandshake).Return(protocol.PacketNumber(2))
+	tp.pnManager.EXPECT().PeekPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(3), protocol.PacketNumberLen2)
+	tp.pnManager.EXPECT().PopPacketNumber(protocol.Encryption1RTT).Return(protocol.PacketNumber(3))
+	tp.sealingManager.EXPECT().GetInitialSealer().Return(newMockShortHeaderSealer(mockCtrl), nil)
+	tp.sealingManager.EXPECT().GetHandshakeSealer().Return(newMockShortHeaderSealer(mockCtrl), nil)
+	tp.sealingManager.EXPECT().Get0RTTSealer().Return(nil, handshake.ErrKeysDropped)
+	tp.sealingManager.EXPECT().Get1RTTSealer().Return(newMockShortHeaderSealer(mockCtrl), nil)
+
+	p, err := tp.packer.PackApplicationClose(&qerr.ApplicationError{ErrorCode: 0x1337}, maxPacketSize, protocol.Version1)
+	require.NoError(t, err)
+	require.Len(t, p.longHdrPackets, 2)
+	require.NotNil(t, p.shortHdrPacket)
+	require.Equal(t, maxPacketSize, p.buffer.Len())
+}

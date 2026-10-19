@@ -35,11 +35,10 @@ type sealer interface {
 }
 
 type payload struct {
-	streamFrames  []ackhandler.StreamFrame
-	frames        []ackhandler.Frame
-	ack           *wire.AckFrame
-	length        protocol.ByteCount
-	preserveOrder bool // Chrome-style: don't shuffle, intersperse PADDING
+	streamFrames []ackhandler.StreamFrame
+	frames       []ackhandler.Frame
+	ack          *wire.AckFrame
+	length       protocol.ByteCount
 }
 
 type longHeaderPacket struct {
@@ -259,7 +258,9 @@ func (p *packetPacker) packConnectionClose(
 		if encLevel == protocol.Encryption1RTT {
 			connID = p.getDestConnID()
 			oneRTTPacketNumber, oneRTTPacketNumberLen = p.pnManager.PeekPacketNumber(protocol.Encryption1RTT)
-			size += p.shortHeaderPacketLength(connID, oneRTTPacketNumberLen, pl)
+			// The AEAD tag counts too. Leaving it out padded a coalesced
+			// Initial 16 bytes too far, past the maximum packet size.
+			size += p.shortHeaderPacketLength(connID, oneRTTPacketNumberLen, pl) + protocol.ByteCount(sealer.Overhead())
 		} else {
 			hdr = p.getLongHeader(encLevel, v)
 			hdrs[i] = hdr
@@ -407,7 +408,7 @@ func (p *packetPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteCo
 			if oneRTTPayload.length > 0 {
 				size += p.shortHeaderPacketLength(connID, oneRTTPacketNumberLen, oneRTTPayload) + protocol.ByteCount(oneRTTSealer.Overhead())
 			}
-		} else if p.perspective == protocol.PerspectiveClient && !onlyAck { // 0-RTT packets can't contain ACK frames
+		} else if p.perspective == protocol.PerspectiveClient && !onlyAck && !p.clientHelloPending() { // 0-RTT packets can't contain ACK frames
 			var err error
 			zeroRTTSealer, err = p.cryptoSetup.Get0RTTSealer()
 			if err != nil && err != handshake.ErrKeysDropped && err != handshake.ErrKeysNotYetAvailable {
@@ -460,6 +461,15 @@ func (p *packetPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteCo
 		packet.shortHdrPacket = &shp
 	}
 	return packet, nil
+}
+
+// clientHelloPending reports whether a Chrome-style ClientHello still has
+// packets to go. quiche writes the whole ClientHello before any 0-RTT data, so
+// each of its Initial packets but the last leaves in a datagram of its own;
+// coalescing a 0-RTT packet behind the first one would put request bytes where
+// Chrome has only padding.
+func (p *packetPacker) clientHelloPending() bool {
+	return p.chromeStyleInitial && p.initialStream != nil && p.initialStream.HasData()
 }
 
 // PackAckOnlyPacket packs a packet containing only an ACK in the application data packet number space.
@@ -567,67 +577,26 @@ func (p *packetPacker) maybeGetCryptoPacket(
 			maxPacketSize -= frameLen
 		}
 		return hdr, pl
-	} else {
-		// Chrome-style Initial packets use smaller CRYPTO frames with PING frames interspersed
-		maxCryptoFrameSize := maxPacketSize
-		var cryptoFrameCount int
-		var maxDataSize protocol.ByteCount = maxPacketSize
-		if p.chromeStyleInitial && encLevel == protocol.EncryptionInitial {
-			maxCryptoFrameSize = 80 // Chrome uses ~70-80 byte CRYPTO frames
-			pl.preserveOrder = true // Don't shuffle, intersperse PADDING
-			// Dynamic maxDataSize: split ClientHello across 2 packets with room for padding
-			totalCHSize := p.initialStream.end
-			if totalCHSize > 0 && totalCHSize != protocol.InvalidByteCount {
-				// Estimate total frame bytes: crypto data + ~8% overhead (frame headers + PINGs)
-				estimatedFrameTotal := totalCHSize + totalCHSize/12
-				targetPerPacket := (estimatedFrameTotal + 1) / 2
-				// Ensure at least 200 bytes padding per packet
-				if maxAllowed := maxPacketSize - 200; targetPerPacket > maxAllowed {
-					targetPerPacket = maxAllowed
-				}
-				maxDataSize = targetPerPacket
-			}
+	}
+
+	// A Chrome-style ClientHello too big for one packet starts with its head
+	// and tail in the first packet; see chaos_protector.go.
+	if p.chromeStyleInitial && encLevel == protocol.EncryptionInitial {
+		if frames, length := p.chromeFirstPacketFrames(maxPacketSize, handler, v); frames != nil {
+			pl.frames = append(pl.frames, frames...)
+			pl.length += length
+			return hdr, pl
 		}
+	}
 
-		for hasCryptoData() {
-			if p.chromeStyleInitial && encLevel == protocol.EncryptionInitial {
-				if pl.length >= maxDataSize {
-					break
-				}
-			}
-
-			currentMaxSize := maxCryptoFrameSize
-			if p.chromeStyleInitial && encLevel == protocol.EncryptionInitial {
-				if remainingSpace := maxDataSize - pl.length; remainingSpace < currentMaxSize {
-					currentMaxSize = remainingSpace
-				}
-			}
-			frameSize := min(currentMaxSize, maxPacketSize)
-			cf := popCryptoFrame(frameSize)
-			if cf == nil {
-				break
-			}
-			pl.frames = append(pl.frames, ackhandler.Frame{Frame: cf, Handler: handler})
-			pl.length += cf.Length(v)
-			maxPacketSize -= cf.Length(v)
-			cryptoFrameCount++
-
-			// Chrome-style: add PING frames after every 2 CRYPTO frames
-			if p.chromeStyleInitial && encLevel == protocol.EncryptionInitial && cryptoFrameCount%2 == 0 && maxPacketSize > 1 {
-				ping := &wire.PingFrame{}
-				pl.frames = append(pl.frames, ackhandler.Frame{Frame: ping, Handler: emptyHandler{}})
-				pl.length += ping.Length(v)
-				maxPacketSize -= ping.Length(v)
-			}
+	for hasCryptoData() {
+		cf := popCryptoFrame(maxPacketSize)
+		if cf == nil {
+			break
 		}
-
-		// Add trailing PING for Chrome-like frame count
-		if p.chromeStyleInitial && encLevel == protocol.EncryptionInitial && cryptoFrameCount > 0 && maxPacketSize > 1 {
-			ping := &wire.PingFrame{}
-			pl.frames = append(pl.frames, ackhandler.Frame{Frame: ping, Handler: emptyHandler{}})
-			pl.length += ping.Length(v)
-			maxPacketSize -= ping.Length(v)
-		}
+		pl.frames = append(pl.frames, ackhandler.Frame{Frame: cf, Handler: handler})
+		pl.length += cf.Length(v)
+		maxPacketSize -= cf.Length(v)
 	}
 	return hdr, pl
 }
@@ -932,7 +901,7 @@ func (p *packetPacker) appendLongHeaderPacket(buffer *packetBuffer, header *wire
 	}
 	payloadOffset := protocol.ByteCount(len(raw))
 
-	raw, err = p.appendPacketPayload(raw, pl, paddingLen, v)
+	raw, err = p.appendLongHeaderPayload(raw, pl, paddingLen, encLevel, v)
 	if err != nil {
 		return nil, err
 	}
@@ -1005,6 +974,19 @@ func (p *packetPacker) appendShortHeaderPacket(
 	}, nil
 }
 
+// appendLongHeaderPayload serializes a long header packet's payload. A client
+// Initial in Chrome style goes through the chaos protector, the way every one
+// of Chrome's does.
+func (p *packetPacker) appendLongHeaderPayload(raw []byte, pl payload, paddingLen protocol.ByteCount, encLevel protocol.EncryptionLevel, v protocol.Version) ([]byte, error) {
+	if p.chromeStyleInitial && p.perspective == protocol.PerspectiveClient && encLevel == protocol.EncryptionInitial {
+		out, applied, err := appendChaosProtectedPayload(raw, pl, paddingLen, &p.rand, v)
+		if err != nil || applied {
+			return out, err
+		}
+	}
+	return p.appendPacketPayload(raw, pl, paddingLen, v)
+}
+
 // appendPacketPayload serializes the payload of a packet into the raw byte slice.
 // It modifies the order of payload.frames.
 func (p *packetPacker) appendPacketPayload(raw []byte, pl payload, paddingLen protocol.ByteCount, v protocol.Version) ([]byte, error) {
@@ -1017,74 +999,26 @@ func (p *packetPacker) appendPacketPayload(raw []byte, pl payload, paddingLen pr
 		}
 	}
 
-	if pl.preserveOrder {
-		// Chrome-style: deterministic order with interspersed single PADDING bytes
-		frameCount := len(pl.frames)
-		var interspersedPad protocol.ByteCount
-		if paddingLen >= 5 && frameCount >= 5 {
-			interspersedPad = 5
+	// randomize the order of control frames
+	if len(pl.frames) > 1 {
+		p.rand.Shuffle(len(pl.frames), func(i, j int) { pl.frames[i], pl.frames[j] = pl.frames[j], pl.frames[i] })
+	}
+	for _, f := range pl.frames {
+		var err error
+		raw, err = f.Frame.Append(raw, v)
+		if err != nil {
+			return nil, err
 		}
-		// Positions to insert a single 0x00 PADDING byte
-		padAt := make(map[int]bool)
-		if interspersedPad > 0 {
-			padAt[-1] = true                  // before first frame
-			padAt[0] = true                   // after first frame
-			padAt[frameCount/3] = true        // ~1/3 through
-			padAt[2*frameCount/3] = true      // ~2/3 through
-			padAt[frameCount-1] = true        // after last frame
+	}
+	for _, f := range pl.streamFrames {
+		var err error
+		raw, err = f.Frame.Append(raw, v)
+		if err != nil {
+			return nil, err
 		}
-		var padWritten protocol.ByteCount
-		for i, f := range pl.frames {
-			// Before first frame
-			if i == 0 && padAt[-1] && padWritten < interspersedPad {
-				raw = append(raw, 0x00)
-				padWritten++
-			}
-			var err error
-			raw, err = f.Frame.Append(raw, v)
-			if err != nil {
-				return nil, err
-			}
-			// After frame at this position
-			if padAt[i] && padWritten < interspersedPad {
-				raw = append(raw, 0x00)
-				padWritten++
-			}
-		}
-		for _, f := range pl.streamFrames {
-			var err error
-			raw, err = f.Frame.Append(raw, v)
-			if err != nil {
-				return nil, err
-			}
-		}
-		// Trailing padding = total padding minus interspersed bytes
-		trailingPad := paddingLen - padWritten
-		if trailingPad > 0 {
-			raw = append(raw, make([]byte, trailingPad)...)
-		}
-	} else {
-		// Default: randomize the order of control frames
-		if len(pl.frames) > 1 {
-			p.rand.Shuffle(len(pl.frames), func(i, j int) { pl.frames[i], pl.frames[j] = pl.frames[j], pl.frames[i] })
-		}
-		for _, f := range pl.frames {
-			var err error
-			raw, err = f.Frame.Append(raw, v)
-			if err != nil {
-				return nil, err
-			}
-		}
-		for _, f := range pl.streamFrames {
-			var err error
-			raw, err = f.Frame.Append(raw, v)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if paddingLen > 0 {
-			raw = append(raw, make([]byte, paddingLen)...)
-		}
+	}
+	if paddingLen > 0 {
+		raw = append(raw, make([]byte, paddingLen)...)
 	}
 
 	if payloadSize := protocol.ByteCount(len(raw)-payloadOffset) - paddingLen; payloadSize != pl.length {

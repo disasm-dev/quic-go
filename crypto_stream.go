@@ -94,6 +94,30 @@ func (s *baseCryptoStream) PopCryptoFrame(maxLen protocol.ByteCount) *wire.Crypt
 	return f
 }
 
+// popFront takes up to n bytes from the front of the queued data as one CRYPTO
+// frame.
+func (s *baseCryptoStream) popFront(n protocol.ByteCount) *wire.CryptoFrame {
+	n = min(n, protocol.ByteCount(len(s.writeBuf)))
+	f := &wire.CryptoFrame{Offset: s.writeOffset, Data: s.writeBuf[:n]}
+	s.writeBuf = s.writeBuf[n:]
+	s.writeOffset += n
+	return f
+}
+
+// popBack takes up to n bytes from the end of the queued data as one CRYPTO
+// frame. What comes before still goes out in order through PopCryptoFrame.
+//
+// The frame keeps pointing into the buffer until it is acknowledged, so the
+// buffer is capped where the frame starts: a later Write has to reallocate
+// rather than append over bytes a retransmission may still need.
+func (s *baseCryptoStream) popBack(n protocol.ByteCount) *wire.CryptoFrame {
+	l := protocol.ByteCount(len(s.writeBuf))
+	n = min(n, l)
+	f := &wire.CryptoFrame{Offset: s.writeOffset + l - n, Data: s.writeBuf[l-n:]}
+	s.writeBuf = s.writeBuf[: l-n : l-n]
+	return f
+}
+
 type cryptoStream struct {
 	baseCryptoStream
 }

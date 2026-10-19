@@ -38,24 +38,17 @@ func DecodePacketNumber(length PacketNumberLen, largest PacketNumber, truncated 
 	return candidate
 }
 
-// PacketNumberLengthForHeader gets the length of the packet number for the public header
-// Chrome uses 2-byte packet numbers before receiving any ACKs, then switches to 1-byte
-func PacketNumberLengthForHeader(pn, largestAcked PacketNumber) PacketNumberLen {
-	var numUnacked PacketNumber
-	if largestAcked == InvalidPacketNumber {
-		numUnacked = pn + 1
-	} else {
-		numUnacked = pn - largestAcked
-	}
-	// Only use 1-byte after ACKs flow and gap is small
-	if largestAcked != InvalidPacketNumber && numUnacked < 1<<(8-1) {
+// PacketNumberLengthForDelta is the packet number length for a packet delta
+// packets ahead of what the peer is awaiting, chosen as quiche does: the
+// shortest encoding of four times delta. That is QuicFramer's
+// GetMinPacketNumberLength, which never picks 3 bytes.
+func PacketNumberLengthForDelta(delta PacketNumber) PacketNumberLen {
+	switch d := 4 * delta; {
+	case d < 1<<8:
 		return PacketNumberLen1
-	}
-	if numUnacked < 1<<(16-1) {
+	case d < 1<<16:
 		return PacketNumberLen2
+	default:
+		return PacketNumberLen4
 	}
-	if numUnacked < 1<<(24-1) {
-		return PacketNumberLen3
-	}
-	return PacketNumberLen4
 }

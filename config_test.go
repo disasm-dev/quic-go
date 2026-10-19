@@ -122,6 +122,8 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 			f.Set(reflect.ValueOf(true))
 		case "InitialPacketSize":
 			f.Set(reflect.ValueOf(uint16(1350)))
+		case "InitialPacketSizeIPv6":
+			f.Set(reflect.ValueOf(uint16(1330)))
 		case "DisablePathMTUDiscovery":
 			f.Set(reflect.ValueOf(true))
 		case "Allow0RTT":

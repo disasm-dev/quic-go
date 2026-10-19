@@ -31,17 +31,12 @@ func TestDecodePacketNumber(t *testing.T) {
 	require.Equal(t, PacketNumber(0xa82f9b32), DecodePacketNumber(PacketNumberLen2, 0xa82f30ea, 0x9b32))
 }
 
-func TestPacketNumberLengthForHeader(t *testing.T) {
-	require.Equal(t, PacketNumberLen2, PacketNumberLengthForHeader(1, InvalidPacketNumber))
-	require.Equal(t, PacketNumberLen2, PacketNumberLengthForHeader(1<<15-2, InvalidPacketNumber))
-	require.Equal(t, PacketNumberLen3, PacketNumberLengthForHeader(1<<15-1, InvalidPacketNumber))
-	require.Equal(t, PacketNumberLen3, PacketNumberLengthForHeader(1<<23-2, InvalidPacketNumber))
-	require.Equal(t, PacketNumberLen4, PacketNumberLengthForHeader(1<<23-1, InvalidPacketNumber))
-	require.Equal(t, PacketNumberLen2, PacketNumberLengthForHeader(1<<15+9, 10))
-	require.Equal(t, PacketNumberLen3, PacketNumberLengthForHeader(1<<15+10, 10))
-	require.Equal(t, PacketNumberLen3, PacketNumberLengthForHeader(1<<23+99, 100))
-	require.Equal(t, PacketNumberLen4, PacketNumberLengthForHeader(1<<23+100, 100))
-	// examples from https://www.rfc-editor.org/rfc/rfc9000.html#section-a.2
-	require.Equal(t, PacketNumberLen2, PacketNumberLengthForHeader(0xac5c02, 0xabe8b3))
-	require.Equal(t, PacketNumberLen3, PacketNumberLengthForHeader(0xace8fe, 0xabe8b3))
+func TestPacketNumberLengthForDelta(t *testing.T) {
+	// quiche: the shortest encoding of four times the delta, 1, 2 or 4 bytes.
+	require.Equal(t, PacketNumberLen1, PacketNumberLengthForDelta(0))
+	require.Equal(t, PacketNumberLen1, PacketNumberLengthForDelta(63))
+	require.Equal(t, PacketNumberLen2, PacketNumberLengthForDelta(64))
+	require.Equal(t, PacketNumberLen2, PacketNumberLengthForDelta(1<<14-1))
+	require.Equal(t, PacketNumberLen4, PacketNumberLengthForDelta(1<<14))
+	require.Equal(t, PacketNumberLen4, PacketNumberLengthForDelta(1<<30))
 }

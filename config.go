@@ -45,6 +45,12 @@ func validateConfig(config *Config) error {
 	if config.InitialPacketSize > protocol.MaxPacketBufferSize {
 		config.InitialPacketSize = protocol.MaxPacketBufferSize
 	}
+	if config.InitialPacketSizeIPv6 > 0 && config.InitialPacketSizeIPv6 < protocol.MinInitialPacketSize {
+		config.InitialPacketSizeIPv6 = protocol.MinInitialPacketSize
+	}
+	if config.InitialPacketSizeIPv6 > protocol.MaxPacketBufferSize {
+		config.InitialPacketSizeIPv6 = protocol.MaxPacketBufferSize
+	}
 	// check that all QUIC versions are actually supported
 	for _, v := range config.Versions {
 		if !protocol.IsValidVersion(v) {
@@ -123,6 +129,7 @@ func populateConfig(config *Config) *Config {
 		MaxDatagramFrameSize:             config.MaxDatagramFrameSize,
 		AdditionalTransportParameters:    config.AdditionalTransportParameters,
 		InitialPacketSize:                initialPacketSize,
+		InitialPacketSizeIPv6:            config.InitialPacketSizeIPv6,
 		DisablePathMTUDiscovery:          config.DisablePathMTUDiscovery,
 		EnableStreamResetPartialDelivery: config.EnableStreamResetPartialDelivery,
 		Allow0RTT:                        config.Allow0RTT,
