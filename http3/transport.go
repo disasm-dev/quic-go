@@ -253,7 +253,15 @@ func (t *Transport) doRoundTripOpt(req *http.Request, opt RoundTripOpt, isRetrie
 			return nil, err
 		}
 
-		t.removeClient(hostname)
+		// Only a connection that can no longer carry requests leaves the
+		// pool. A stream error on a live one, a reset or a rejected request,
+		// says nothing about the connection, and Chrome keeps using it.
+		// Dropping it here also left it open: nothing closed it, keep-alives
+		// kept it from idling out, and it held its socket until the
+		// transport closed.
+		if connUnusable(err, cl.conn) {
+			t.removeClient(hostname)
+		}
 		req, err = canRetryRequest(err, req)
 		if err != nil {
 			return nil, err
@@ -261,6 +269,16 @@ func (t *Transport) doRoundTripOpt(req *http.Request, opt RoundTripOpt, isRetrie
 		return t.doRoundTripOpt(req, opt, true)
 	}
 	return rsp, nil
+}
+
+// connUnusable reports whether a roundtrip error means the connection itself
+// is done: its stream could not be opened, or the connection has ended.
+func connUnusable(err error, conn *quic.Conn) bool {
+	var connErr *errConnUnusable
+	if errors.As(err, &connErr) {
+		return true
+	}
+	return conn == nil || conn.Context().Err() != nil
 }
 
 func canRetryRequest(err error, req *http.Request) (*http.Request, error) {
